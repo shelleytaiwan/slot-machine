@@ -2,8 +2,8 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>句型拉霸機</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>句型拉霸機 - 流暢語音版</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700;800&family=Noto+Sans+TC:wght@700;900&display=swap" rel="stylesheet">
@@ -378,16 +378,69 @@ function spin(){
   });
 }
 
+/* 核心改動：產生包含自然停頓 (逗號/句號間隔) 的語音文字，而非一氣呵成 */
+function buildSpeechWithPauses(rawSentence, wordsArray) {
+  // wordsArray 是七個原始詞彙 [開頭語氣, 誰, 何時, 在哪, 怎樣地, 做什麼, 結尾語氣]
+  // 我們要將各個區塊加入適當的停頓標點，讓語音引擎自動換氣。
+  // 為了保留原本顯示畫面的完整句子，但語音版加入頓挫感。
+  // 策略: 開頭語氣後停頓0.4秒(用逗號+空格)，主詞後微頓，時間＋地點後頓，動作前微頓，結尾句號。
+  // 但瀏覽器 speechSynthesis 不支援 SSML 暫停長度，改用「，」或者「...」間隔較實際。
+  // 更穩重作法：在各區塊間插入「，」並於結尾使用句點，自然會產生小停頓。
+  let [op, who, when, where, how, act, end] = wordsArray;
+  
+  // 語音發音優化 (維持原有修正)
+  op = fixOpening(op);
+  how = fixAdverb(how);
+  where = fixPlace(where);
+  let endFixed = fixEnding(end);
+  
+  // 建構帶有呼吸停頓感的句子：
+  // 範例：太好了！ 老師今天在學校開心地大叫，太棒了！
+  // 我們分成： [語氣開頭] + 停頓標點「，」 + [主詞+時間] 微頓 + [地點+動作方式] 微頓 + [動作] + 結尾語氣
+  // 更自然：語氣開頭後逗號；主詞+時間後逗號；地點+副詞+動作後逗號；結尾語氣。
+  let parts = [];
+  
+  // 開頭語氣單獨 (結尾已有！,? 等保留)
+  parts.push(op);
+  
+  // 主詞 + 時間: e.g., "老師昨天"
+  let subjectTime = `${who}${when}`;
+  // 若時間有「在」不要重複，但原本句型就是 `${who}${when}在${where}...` , 我們不額外添加
+  parts.push(subjectTime);
+  
+  // 地點+ 副詞 + 動作 (但保留原本結構)
+  let placeAction = `在${where}${how}${act}`;
+  parts.push(placeAction);
+  
+  // 結尾語氣 (保留感嘆)
+  parts.push(endFixed);
+  
+  // 使用逗號連接，讓每個單元間自動產生明顯停頓 (中文語音遇到逗號會換氣)
+  let pausedSpeech = parts.join("，");
+  
+  // 額外優化：連續標點清理，避免 「！，」 → 改成 「！」
+  pausedSpeech = pausedSpeech.replace(/！，/g, "！").replace(/？，/g, "？").replace(/。，/g, "。");
+  // 確保結尾語氣後有句號或感嘆，提高結束感。
+  if(!pausedSpeech.endsWith("。") && !pausedSpeech.endsWith("！") && !pausedSpeech.endsWith("？")){
+    pausedSpeech += "。";
+  } else if(pausedSpeech.endsWith("。") && endFixed.includes("！")){
+    // 稍微保留原味，沒關係
+  }
+  return pausedSpeech;
+}
+
 function finish(words){
   spinning=false;
 
-  // 組句：語氣！ 人 時間 在地點 方式動作，結尾！
-  const [op,who,when,where,how,act,end]=words;
+  // 組句 (顯示用)：保持原本誇張風格
+  const [op,who,when,where,how,act,end] = words;
   const sentence = `${op}　${who}${when}在${where}${how}${act}，${end}`;
-  // 語音版：只修正開頭格的「蛤」和方式格的「地」，其餘照舊（保護「草地上」等）
-  const speechStr = `${fixOpening(op)}　${who}${when}在${fixPlace(where)}${fixAdverb(how)}${act}，${fixEnding(end)}`;
+  
+  // 語音版：加入自然呼吸停頓 (各區塊以逗號分割)
+  const speechWithRhythm = buildSpeechWithPauses(sentence, words);
+  
   lastSentence = sentence;
-  lastSpeech = speechStr;
+  lastSpeech = speechWithRhythm;   // 儲存帶有停頓的語音字串
 
   const banner=$("#banner");
   banner.classList.remove("idle");
@@ -395,21 +448,23 @@ function finish(words){
   banner.classList.remove("pop"); void banner.offsetWidth; banner.classList.add("pop");
 
   winSound();
-  speak(speechStr);
+  speak(lastSpeech);
 }
 
-/* ===================== 語音（AI 唸出來） ===================== */
+/* ===================== 語音（AI 唸出來）加入停頓節奏 ===================== */
 let voiceOn=true, zhVoice=null;
 
-/* 修正發音（只在正確的位置換字，且只影響語音、不改畫面）：
-   ・副詞slot的「地」→ 念輕聲 de（用「的」代替）；「草地上」這種名詞的地不會被動到
-   ・台灣人的「蛤」há → 用「哈」＋問號上揚語氣模擬 */
-function fixAdverb(w){ return w.replace(/地/g,"的"); }   // 只對「怎麼樣地」那一格用
-function fixOpening(w){ return w.replace(/蛤/g,"哈"); }  // 只對「語氣(開頭)」那一格用
-function fixPlace(w){ return w.replace("101","一零一"); } // 101大樓 念「一零一」不是「一百零一」
-// 句尾「哦」念低低的輕聲（像「太扯了」的「了」，不上揚、不念高一聲）：
-// 換成口語的「喔」，並把「！」改成「。」→ 讓語音用低平的句末語調收尾，而非上揚
-function fixEnding(w){ return w.includes("哦") ? w.replace(/哦/g,"喔").replace(/！/g,"。") : w; }
+/* 修正發音（只在正確的位置換字，且只影響語音、不改畫面） */
+function fixAdverb(w){ return w.replace(/地/g,"的"); }   
+function fixOpening(w){ return w.replace(/蛤/g,"哈"); }  
+function fixPlace(w){ return w.replace("101","一零一"); } 
+function fixEnding(w){ 
+  // 結尾「哦」轉成「喔」並將結尾！調整句號但不影響情緒感
+  let fixed = w.replace(/哦/g,"喔");
+  // 若結尾為！保留一個感嘆即可, 但為了停頓舒緩可以加上句號但已有逗號分隔，不用overkill
+  return fixed;
+}
+
 function pickVoice(){
   const vs=speechSynthesis.getVoices();
   zhVoice = vs.find(v=>/zh-TW|zh_TW/i.test(v.lang))
@@ -422,12 +477,16 @@ if('speechSynthesis' in window){
   pickVoice();
   speechSynthesis.onvoiceschanged=pickVoice;
 }
+
 function speak(text){
   if(!voiceOn || !('speechSynthesis' in window)) return;
   speechSynthesis.cancel();
   const u=new SpeechSynthesisUtterance(text);
-  u.lang="zh-TW"; if(zhVoice)u.voice=zhVoice;
-  u.rate=0.95; u.pitch=1.12; u.volume=1;
+  u.lang="zh-TW"; 
+  if(zhVoice) u.voice=zhVoice;
+  u.rate=0.92;      // 稍微慢一點，更從容
+  u.pitch=1.08;     
+  u.volume=1;
   speechSynthesis.speak(u);
 }
 
