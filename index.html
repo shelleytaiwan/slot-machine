@@ -318,6 +318,19 @@ function spin(){
   if(spinning) return;
   spinning=true;
 
+  // 解鎖語音朗讀：轉輪動畫結束後才會呼叫 speak()，那時已經離開使用者
+  // 點擊/拉桿的那個瞬間（是靠 transitionend 事件觸發的），Safari（尤其
+  // iOS）會判定那不是使用者操作而整段靜音。這裡趁著現在還在使用者手勢
+  // 當下，先同步發一個無聲的 utterance「解鎖」語音功能，之後 finish()
+  // 裡真正要念的那句才有機會正常出聲。
+  if('speechSynthesis' in window){
+    try{
+      const unlock=new SpeechSynthesisUtterance(' ');
+      unlock.volume=0;
+      speechSynthesis.speak(unlock);
+    }catch(e){}
+  }
+
   // 拉桿動畫
   const lever=$("#lever"); lever.classList.add("pulled");
   setTimeout(()=>lever.classList.remove("pulled"),420);
@@ -480,12 +493,13 @@ if('speechSynthesis' in window){
 
 function speak(text){
   if(!voiceOn || !('speechSynthesis' in window)) return;
+  if(!zhVoice) return; // 找不到中文語音就不出聲，避免用錯的語音亂念
   speechSynthesis.cancel();
   const u=new SpeechSynthesisUtterance(text);
-  u.lang="zh-TW"; 
-  if(zhVoice) u.voice=zhVoice;
+  u.lang="zh-TW";
+  u.voice=zhVoice;
   u.rate=0.92;      // 稍微慢一點，更從容
-  u.pitch=1.08;     
+  u.pitch=1.08;
   u.volume=1;
   speechSynthesis.speak(u);
 }
